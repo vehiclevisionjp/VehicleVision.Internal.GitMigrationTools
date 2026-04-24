@@ -7,14 +7,32 @@ import tempfile
 import threading
 import tkinter as tk
 import urllib.parse
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
+
+
+STEP_STATUS_ICONS: dict[str, str] = {
+    "pending": "☐",
+    "running": "▶",
+    "done": "✅",
+    "skipped": "⊘",
+    "failed": "❌",
+}
+
+STEP_STATUS_COLORS: dict[str, str] = {
+    "pending": "#555555",
+    "running": "#0a64c8",
+    "done": "#1f7a1f",
+    "skipped": "#888888",
+    "failed": "#b00020",
+}
 
 
 class MigrationApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Git Repository Migration Tool (with LFS)")
-        self.root.geometry("900x620")
+        self.root.geometry("1100x720")
 
         # Set application icon if available
         icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
@@ -28,6 +46,11 @@ class MigrationApp:
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker_thread: threading.Thread | None = None
         self.system_encoding = locale.getpreferredencoding(False) or "utf-8"
+
+        # Step indicator state. Each entry: key -> {"name": str, "status": str, "label": tk.Label}
+        self._steps: dict[str, dict[str, object]] = {}
+        self._step_order: list[str] = []
+        self._current_step: str | None = None
 
         self.source_url = tk.StringVar()
         self.destination_url = tk.StringVar()
@@ -150,10 +173,41 @@ class MigrationApp:
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(fill=tk.X, pady=(0, 12))
 
-        log_label = ttk.Label(frame, text="実行ログ:")
+        # Bottom area: step panel on the left, log on the right.
+        bottom = ttk.Frame(frame)
+        bottom.pack(fill=tk.BOTH, expand=True)
+
+        # Fonts used to render the step list. Completed steps use overstrike to
+        # give a "消し込み" (cross-off) effect.
+        self._step_font_pending = tkfont.Font(family="Segoe UI", size=10)
+        self._step_font_running = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+        self._step_font_done = tkfont.Font(family="Segoe UI", size=10, overstrike=True)
+        self._step_font_skipped = tkfont.Font(
+            family="Segoe UI", size=10, slant="italic"
+        )
+        self._step_font_failed = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+
+        steps_outer = ttk.LabelFrame(bottom, text="実行ステップ", padding=8)
+        steps_outer.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        self.current_step_var = tk.StringVar(value="待機中")
+        ttk.Label(
+            steps_outer,
+            textvariable=self.current_step_var,
+            foreground="#0a64c8",
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.steps_container = ttk.Frame(steps_outer, width=280)
+        self.steps_container.pack(fill=tk.BOTH, expand=True)
+        self.steps_container.pack_propagate(False)
+
+        log_frame = ttk.Frame(bottom)
+        log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        log_label = ttk.Label(log_frame, text="実行ログ:")
         log_label.pack(anchor=tk.W)
 
-        self.log_text = tk.Text(frame, height=24, wrap=tk.WORD)
+        self.log_text = tk.Text(log_frame, height=24, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
 
@@ -242,6 +296,112 @@ class MigrationApp:
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
+    # ---- Step indicator helpers --------------------------------------------------
+
+    def _build_step_definitions(
+        self,
+        include_lfs: bool,
+        check_destination_empty: bool,
+        enable_verification: bool,
+        verification_mode: str,
+        apply_github_default_branch: bool,
+        apply_github_security: bool,
+    ) -> list[tuple[str, str]]:
+        steps: list[tuple[str, str]] = [("prepare", "準備 (依存ツール確認)")]
+        if check_destination_empty:
+            steps.append(("dest_empty", "移行先 空チェック"))
+        steps.append(("clone_mirror", "ミラークローン"))
+        steps.append(("set_push_url", "プッシュURL設定"))
+        steps.append(("push_mirror", "ミラープッシュ"))
+        if include_lfs:
+            steps.append(("lfs_fetch", "LFS フェッチ"))
+            steps.append(("lfs_push", "LFS プッシュ"))
+        if apply_github_default_branch:
+            steps.append(("gh_default_branch", "GitHub デフォルトブランチ設定"))
+        if apply_github_security:
+            steps.append(("gh_security", "GitHub セキュリティ設定"))
+        if enable_verification:
+            steps.append(("verify_clone", "ヴェリファイ: 移行先クローン"))
+            steps.append(("verify_refs", "ヴェリファイ: refs一致確認"))
+            steps.append(("verify_fsck", "ヴェリファイ: fsck"))
+            if include_lfs:
+                steps.append(("verify_lfs", "ヴェリファイ: LFS フェッチ"))
+            if verification_mode == "strict":
+                steps.append(("verify_strict", "ヴェリファイ: strict内容比較"))
+        steps.append(("cleanup", "後片付け"))
+        return steps
+
+    def _register_steps(self, definitions: list[tuple[str, str]]) -> None:
+        """Rebuild the step indicator list. Must be called on the UI thread."""
+        for child in self.steps_container.winfo_children():
+            child.destroy()
+        self._steps.clear()
+        self._step_order = [key for key, _name in definitions]
+        self._current_step = None
+        self.current_step_var.set("実行ステップを準備しました")
+
+        for key, name in definitions:
+            row = ttk.Frame(self.steps_container)
+            row.pack(fill=tk.X, anchor=tk.W, pady=1)
+            label = tk.Label(
+                row,
+                text=f"{STEP_STATUS_ICONS['pending']}  {name}",
+                anchor=tk.W,
+                justify=tk.LEFT,
+                font=self._step_font_pending,
+                foreground=STEP_STATUS_COLORS["pending"],
+            )
+            label.pack(fill=tk.X, anchor=tk.W)
+            self._steps[key] = {"name": name, "status": "pending", "label": label}
+
+    def _apply_step_status(self, key: str, status: str) -> None:
+        """Update the visual representation of a step. Runs on the UI thread."""
+        entry = self._steps.get(key)
+        if entry is None:
+            return
+        if status not in STEP_STATUS_ICONS:
+            return
+        entry["status"] = status
+        label: tk.Label = entry["label"]  # type: ignore[assignment]
+        name: str = entry["name"]  # type: ignore[assignment]
+        icon = STEP_STATUS_ICONS[status]
+        label.configure(
+            text=f"{icon}  {name}",
+            foreground=STEP_STATUS_COLORS[status],
+            font={
+                "pending": self._step_font_pending,
+                "running": self._step_font_running,
+                "done": self._step_font_done,
+                "skipped": self._step_font_skipped,
+                "failed": self._step_font_failed,
+            }[status],
+        )
+        if status == "running":
+            self.current_step_var.set(f"現在: {name}")
+        elif status in {"done", "skipped", "failed"} and self._current_step == key:
+            self.current_step_var.set("待機中")
+
+    def _step(self, key: str, status: str) -> None:
+        """Thread-safe entry point used by the worker thread to update a step."""
+        if status == "running":
+            self._current_step = key
+        elif self._current_step == key:
+            self._current_step = None
+        self.root.after(0, lambda k=key, s=status: self._apply_step_status(k, s))
+
+    def _mark_remaining_steps(self, status: str) -> None:
+        """Set every still-pending step to the given status (used for dry-run / failure)."""
+        for key in self._step_order:
+            entry = self._steps.get(key)
+            if entry is None:
+                continue
+            if entry["status"] == "pending":
+                self._step(key, status)
+
+    def _fail_current_step(self) -> None:
+        if self._current_step is not None:
+            self._step(self._current_step, "failed")
+
     def start_migration(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showwarning("実行中", "すでに移行処理が実行中です。")
@@ -256,6 +416,17 @@ class MigrationApp:
 
         self.start_button.configure(state=tk.DISABLED)
         self.progress.start(10)
+
+        step_definitions = self._build_step_definitions(
+            include_lfs=self.include_lfs.get(),
+            check_destination_empty=self.check_destination_empty.get(),
+            enable_verification=self.enable_verification.get(),
+            verification_mode=self.verification_mode.get(),
+            apply_github_default_branch=self.apply_github_default_branch.get(),
+            apply_github_security=self.apply_github_security.get(),
+        )
+        self._register_steps(step_definitions)
+
         self.log_queue.put("=== 移行処理を開始します ===")
         self.log_queue.put(f"移行元: {source}")
         self.log_queue.put(f"移行先: {destination}")
@@ -310,16 +481,18 @@ class MigrationApp:
         destination_mirror_dir = os.path.join(temp_dir, "destination-mirror.git")
 
         try:
+            self._step("prepare", "running")
             self._ensure_command("git")
             if include_lfs:
                 self._ensure_git_lfs()
+            self._step("prepare", "done")
 
             self.log_queue.put(f"作業ディレクトリ: {temp_dir}")
 
             if dry_run:
                 self.log_queue.put("ドライランのため、以下のコマンドは実行されません。")
                 commands = self._build_migration_commands(source, destination, mirror_dir, include_lfs)
-                for command in commands:
+                for _step_key, command in commands:
                     self.log_queue.put(f"[DRY-RUN] {' '.join(command)}")
 
                 if check_destination_empty:
@@ -335,6 +508,8 @@ class MigrationApp:
                 if github_repo and apply_github_security:
                     self.log_queue.put("[DRY-RUN] GitHubセキュリティ設定適用を実施予定")
 
+                self._mark_remaining_steps("skipped")
+
                 self.log_queue.put("=== ドライランが完了しました ===")
                 self.root.after(
                     0,
@@ -343,11 +518,15 @@ class MigrationApp:
                 return
 
             if check_destination_empty:
+                self._step("dest_empty", "running")
                 self._assert_destination_is_empty(destination)
+                self._step("dest_empty", "done")
 
             commands = self._build_migration_commands(source, destination, mirror_dir, include_lfs)
-            for command in commands:
+            for step_key, command in commands:
+                self._step(step_key, "running")
                 self._run_command(command)
+                self._step(step_key, "done")
 
             github_repo = self._parse_github_repo(destination)
             if github_repo and (apply_github_default_branch or apply_github_security):
@@ -362,6 +541,10 @@ class MigrationApp:
                 )
             elif apply_github_default_branch or apply_github_security:
                 self.log_queue.put("宛先がGitHubではないため、GitHub向け設定はスキップしました。")
+                if apply_github_default_branch:
+                    self._step("gh_default_branch", "skipped")
+                if apply_github_security:
+                    self._step("gh_security", "skipped")
 
             if enable_verification:
                 self._verify_migration(
@@ -379,6 +562,7 @@ class MigrationApp:
                 lambda: messagebox.showinfo("完了", "Gitレポジトリの移行が完了しました。"),
             )
         except Exception as ex:
+            self._fail_current_step()
             self.log_queue.put(f"エラー: {ex}")
             self.log_queue.put("=== 移行に失敗しました ===")
             self.root.after(
@@ -388,11 +572,13 @@ class MigrationApp:
                 ),
             )
         finally:
+            self._step("cleanup", "running")
             if keep_temp:
                 self.log_queue.put("一時ディレクトリを保持しました。")
             else:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 self.log_queue.put("一時ディレクトリを削除しました。")
+            self._step("cleanup", "done")
 
             self.root.after(0, self._set_finished)
 
@@ -410,16 +596,23 @@ class MigrationApp:
 
     def _build_migration_commands(
         self, source: str, destination: str, mirror_dir: str, include_lfs: bool
-    ) -> list[list[str]]:
-        commands = [
-            ["git", "clone", "--mirror", source, mirror_dir],
-            ["git", "-C", mirror_dir, "remote", "set-url", "--push", "origin", destination],
-            ["git", "-C", mirror_dir, "push", "--mirror", "origin"],
+    ) -> list[tuple[str, list[str]]]:
+        commands: list[tuple[str, list[str]]] = [
+            ("clone_mirror", ["git", "clone", "--mirror", source, mirror_dir]),
+            (
+                "set_push_url",
+                ["git", "-C", mirror_dir, "remote", "set-url", "--push", "origin", destination],
+            ),
+            ("push_mirror", ["git", "-C", mirror_dir, "push", "--mirror", "origin"]),
         ]
 
         if include_lfs:
-            commands.append(["git", "-C", mirror_dir, "lfs", "fetch", "--all", "origin"])
-            commands.append(["git", "-C", mirror_dir, "lfs", "push", "--all", destination])
+            commands.append(
+                ("lfs_fetch", ["git", "-C", mirror_dir, "lfs", "fetch", "--all", "origin"])
+            )
+            commands.append(
+                ("lfs_push", ["git", "-C", mirror_dir, "lfs", "push", "--all", destination])
+            )
 
         return commands
 
@@ -446,26 +639,36 @@ class MigrationApp:
 
         self.log_queue.put(f"ヴェリファイ開始: mode={verification_mode}")
 
+        self._step("verify_clone", "running")
         self._run_command(
             ["git", "clone", "--mirror", destination, destination_mirror_dir]
         )
+        self._step("verify_clone", "done")
 
+        self._step("verify_refs", "running")
         source_refs = self._get_refs(source_mirror_dir)
         destination_refs = self._get_refs(destination_mirror_dir)
         if source_refs != destination_refs:
             raise RuntimeError("ヴェリファイ失敗: refsが一致しません。")
         self.log_queue.put(f"ヴェリファイOK: refs一致 ({len(source_refs)} refs)")
+        self._step("verify_refs", "done")
 
+        self._step("verify_fsck", "running")
         self._run_command(["git", "-C", source_mirror_dir, "fsck", "--full"])
         self._run_command(["git", "-C", destination_mirror_dir, "fsck", "--full"])
         self.log_queue.put("ヴェリファイOK: fsck完了")
+        self._step("verify_fsck", "done")
 
         if include_lfs:
+            self._step("verify_lfs", "running")
             self._run_command(["git", "-C", source_mirror_dir, "lfs", "fetch", "--all", "origin"])
             self._run_command(["git", "-C", destination_mirror_dir, "lfs", "fetch", "--all", "origin"])
+            self._step("verify_lfs", "done")
 
         if verification_mode == "strict":
+            self._step("verify_strict", "running")
             self._verify_strict_content(source_mirror_dir, destination_mirror_dir, source_refs)
+            self._step("verify_strict", "done")
 
         self.log_queue.put("ヴェリファイ完了: 一致を確認しました。")
 
@@ -534,6 +737,7 @@ class MigrationApp:
         self.log_queue.put(f"GitHub向け設定を適用します: {owner}/{repo}")
 
         if apply_default_branch:
+            self._step("gh_default_branch", "running")
             if source_default_branch:
                 self._run_command(
                     [
@@ -549,12 +753,15 @@ class MigrationApp:
                 self.log_queue.put(
                     f"GitHubデフォルトブランチを設定しました: {source_default_branch}"
                 )
+                self._step("gh_default_branch", "done")
             else:
                 self.log_queue.put(
                     "移行元デフォルトブランチを取得できなかったため、デフォルトブランチ設定をスキップしました。"
                 )
+                self._step("gh_default_branch", "skipped")
 
         if apply_security:
+            self._step("gh_security", "running")
             self._run_command(
                 [
                     "gh",
@@ -580,6 +787,7 @@ class MigrationApp:
                 ]
             )
             self.log_queue.put("GitHub Automated Security Fixes を有効化しました。")
+            self._step("gh_security", "done")
 
     def _ensure_github_cli_authenticated(self) -> None:
         code, _ = self._run_command_capture_with_code(["gh", "auth", "status"], echo=False)
