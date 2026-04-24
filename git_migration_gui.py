@@ -603,26 +603,15 @@ class MigrationApp:
     def _verify_strict_content(
         self, source_repo_dir: str, destination_repo_dir: str, refs: dict[str, str]
     ) -> None:
-        self.log_queue.put("strict検証: refごとのオブジェクトIDとtree IDを比較します。")
-        verified_tree_refs = 0
+        self.log_queue.put("strict検証: refごとのオブジェクトIDを比較します。")
         for ref_name in sorted(refs.keys()):
             source_obj = self._resolve_ref_object(source_repo_dir, ref_name)
             destination_obj = self._resolve_ref_object(destination_repo_dir, ref_name)
             if source_obj != destination_obj:
                 raise RuntimeError(f"strict検証失敗: refオブジェクト不一致 {ref_name}")
 
-            source_tree = self._resolve_ref_tree(source_repo_dir, ref_name)
-            destination_tree = self._resolve_ref_tree(destination_repo_dir, ref_name)
-            if source_tree is None and destination_tree is None:
-                continue
-
-            if source_tree != destination_tree:
-                raise RuntimeError(f"strict検証失敗: ref tree不一致 {ref_name}")
-
-            verified_tree_refs += 1
-
         self.log_queue.put(
-            f"strict検証OK: {len(refs)} refs 検証完了 (tree比較: {verified_tree_refs})"
+            f"strict検証OK: {len(refs)} refs すべてのオブジェクトIDが一致しました。"
         )
 
     def _resolve_ref_object(self, repo_dir: str, ref_name: str) -> str:
@@ -636,20 +625,6 @@ class MigrationApp:
         resolved = output.strip().splitlines()
         if not resolved:
             raise RuntimeError(f"strict検証失敗: ref解決結果が空です {ref_name}")
-
-        return resolved[0].strip()
-
-    def _resolve_ref_tree(self, repo_dir: str, ref_name: str) -> str | None:
-        code, output = self._run_command_capture_with_code(
-            ["git", "-C", repo_dir, "rev-parse", "--verify", f"{ref_name}^{{tree}}"],
-            echo=False,
-        )
-        if code != 0:
-            return None
-
-        resolved = output.strip().splitlines()
-        if not resolved:
-            return None
 
         return resolved[0].strip()
 

@@ -66,7 +66,7 @@ git -C <temp>/mirror.git lfs push --all <destination>
 - `git clone --mirror <destination>` で移行先ミラーを取得
 - `for-each-ref` で heads/tags の参照一致を確認
 - 移行元/移行先の `git fsck --full` を実行
-- `strict` モードでは、各refの解決オブジェクトIDと tree ID（取得可能な場合）を比較
+- `strict` モードでは、各refの解決オブジェクトIDが完全に一致するか比較
 
 GitHub 宛先の場合、GitHub CLI (`gh`) で認証済みなら以下も実施できます。
 
