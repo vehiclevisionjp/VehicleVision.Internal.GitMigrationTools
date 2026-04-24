@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Calculate next version
+        id: version
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+
+          $latestTag = (git tag --list "v*" --sort=-v:refname | Select-Object -First 1)
+          if (-not $latestTag) {
+            $latestTag = "v0.0.0"
+          }
+
+          if ($latestTag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            throw "Latest tag format is invalid: $latestTag (expected vX.Y.Z)"
+          }
+
+          $major = [int]$Matches[1]
+          $minor = [int]$Matches[2]
+          $patch = [int]$Matches[3]
+
+          switch ("${{ github.event.inputs.bump }}") {
+            "major" {
+              $major += 1
+              $minor = 0
+              $patch = 0
+            }
+            "minor" {
+              $minor += 1
+              $patch = 0
+            }
+            "patch" {
+              $patch += 1
+            }
+            default {
+              throw "Unsupported bump type: ${{ github.event.inputs.bump }}"
+            }
+          }
+
+          $newTag = "v$major.$minor.$patch"
+          "latest_tag=$latestTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "new_tag=$newTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "Latest tag: $latestTag"
+          Write-Host "New tag: $newTag"
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          .\build_exe.ps1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/GitMigrationTool.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
