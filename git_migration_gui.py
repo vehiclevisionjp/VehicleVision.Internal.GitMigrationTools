@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
+import urllib.parse
 from tkinter import messagebox, ttk
 
 
@@ -27,8 +28,14 @@ class MigrationApp:
         self.dry_run = tk.BooleanVar(value=False)
         self.enable_verification = tk.BooleanVar(value=True)
         self.verification_mode = tk.StringVar(value="strict")
+        self.apply_github_default_branch = tk.BooleanVar(value=True)
+        self.apply_github_security = tk.BooleanVar(value=True)
+        self.git_status = tk.StringVar(value="git: checking...")
+        self.git_lfs_status = tk.StringVar(value="git-lfs: checking...")
+        self.gh_status = tk.StringVar(value="gh: checking...")
 
         self._build_ui()
+        self._check_required_apps_on_startup()
         self._schedule_log_pump()
 
     def _build_ui(self) -> None:
@@ -41,6 +48,12 @@ class MigrationApp:
             font=("Segoe UI", 16, "bold"),
         )
         title.pack(anchor=tk.W, pady=(0, 16))
+
+        status_frame = ttk.LabelFrame(frame, text="依存ツール状態", padding=8)
+        status_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(status_frame, textvariable=self.git_status).pack(anchor=tk.W)
+        ttk.Label(status_frame, textvariable=self.git_lfs_status).pack(anchor=tk.W)
+        ttk.Label(status_frame, textvariable=self.gh_status).pack(anchor=tk.W)
 
         form = ttk.Frame(frame)
         form.pack(fill=tk.X)
@@ -60,11 +73,12 @@ class MigrationApp:
         options = ttk.Frame(frame)
         options.pack(fill=tk.X, pady=(8, 12))
 
-        ttk.Checkbutton(
+        self.include_lfs_checkbox = ttk.Checkbutton(
             options,
             text="Git LFSを含めて移行する",
             variable=self.include_lfs,
-        ).pack(anchor=tk.W)
+        )
+        self.include_lfs_checkbox.pack(anchor=tk.W)
 
         ttk.Checkbutton(
             options,
@@ -89,6 +103,20 @@ class MigrationApp:
             text="移行後ヴェリファイを実施する",
             variable=self.enable_verification,
         ).pack(anchor=tk.W)
+
+        self.github_default_branch_checkbox = ttk.Checkbutton(
+            options,
+            text="GitHub宛先時にデフォルトブランチを設定する",
+            variable=self.apply_github_default_branch,
+        )
+        self.github_default_branch_checkbox.pack(anchor=tk.W)
+
+        self.github_security_checkbox = ttk.Checkbutton(
+            options,
+            text="GitHub宛先時に推奨セキュリティ設定を有効化する",
+            variable=self.apply_github_security,
+        )
+        self.github_security_checkbox.pack(anchor=tk.W)
 
         verification_mode_frame = ttk.Frame(options)
         verification_mode_frame.pack(anchor=tk.W, pady=(4, 0))
@@ -123,6 +151,64 @@ class MigrationApp:
         scrollbar = ttk.Scrollbar(self.log_text, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _check_required_apps_on_startup(self) -> None:
+        missing: list[str] = []
+
+        git_available = self._is_command_available(["git", "--version"])
+        self.git_status.set(f"git: {'OK' if git_available else 'NG'}")
+        if not git_available:
+            missing.append("git")
+
+        git_lfs_available = self._is_command_available(["git", "lfs", "version"])
+        self.git_lfs_status.set(f"git-lfs: {'OK' if git_lfs_available else 'NG'}")
+        if not git_lfs_available:
+            missing.append("git-lfs")
+            self.include_lfs.set(False)
+            self.include_lfs_checkbox.configure(state=tk.DISABLED)
+            self.log_queue.put("起動チェック: git-lfs が見つからないため LFS 移行を無効化しました。")
+
+        gh_available = self._is_command_available(["gh", "--version"])
+        self.gh_status.set(f"gh: {'OK' if gh_available else 'NG'}")
+        if not gh_available:
+            missing.append("gh")
+            self.apply_github_default_branch.set(False)
+            self.apply_github_security.set(False)
+            self.github_default_branch_checkbox.configure(state=tk.DISABLED)
+            self.github_security_checkbox.configure(state=tk.DISABLED)
+            self.log_queue.put(
+                "起動チェック: gh が見つからないため GitHub 自動設定を無効化しました。"
+            )
+
+        if missing:
+            self.log_queue.put(f"起動チェック: 未検出アプリ: {', '.join(missing)}")
+
+        if "git" in missing:
+            self.start_button.configure(state=tk.DISABLED)
+            messagebox.showerror(
+                "必須アプリ未導入",
+                "git が見つからないため実行できません。インストール後に再起動してください。",
+            )
+        elif missing:
+            messagebox.showwarning(
+                "起動チェック",
+                "一部アプリが見つからないため、関連機能を無効化しました: "
+                + ", ".join(missing),
+            )
+
+    def _is_command_available(self, command: list[str]) -> bool:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding=self.system_encoding,
+                errors="replace",
+                check=False,
+            )
+            return completed.returncode == 0
+        except OSError:
+            return False
 
     def _schedule_log_pump(self) -> None:
         self._drain_log_queue()
@@ -170,6 +256,10 @@ class MigrationApp:
             self.log_queue.put(f"ヴェリファイ: 有効 ({self.verification_mode.get()})")
         else:
             self.log_queue.put("ヴェリファイ: 無効")
+        if self.apply_github_default_branch.get():
+            self.log_queue.put("GitHubデフォルトブランチ設定: 有効")
+        if self.apply_github_security.get():
+            self.log_queue.put("GitHubセキュリティ設定: 有効")
 
         self.worker_thread = threading.Thread(
             target=self._run_migration,
@@ -182,6 +272,8 @@ class MigrationApp:
                 self.dry_run.get(),
                 self.enable_verification.get(),
                 self.verification_mode.get(),
+                self.apply_github_default_branch.get(),
+                self.apply_github_security.get(),
             ),
             daemon=True,
         )
@@ -201,6 +293,8 @@ class MigrationApp:
         dry_run: bool,
         enable_verification: bool,
         verification_mode: str,
+        apply_github_default_branch: bool,
+        apply_github_security: bool,
     ) -> None:
         temp_dir = tempfile.mkdtemp(prefix="git-migration-")
         mirror_dir = os.path.join(temp_dir, "mirror.git")
@@ -226,6 +320,11 @@ class MigrationApp:
                     self.log_queue.put(
                         f"[DRY-RUN] 移行後ヴェリファイを実施予定: mode={verification_mode}"
                     )
+                github_repo = self._parse_github_repo(destination)
+                if github_repo and apply_github_default_branch:
+                    self.log_queue.put("[DRY-RUN] GitHubデフォルトブランチ設定を実施予定")
+                if github_repo and apply_github_security:
+                    self.log_queue.put("[DRY-RUN] GitHubセキュリティ設定適用を実施予定")
 
                 self.log_queue.put("=== ドライランが完了しました ===")
                 self.root.after(
@@ -240,6 +339,20 @@ class MigrationApp:
             commands = self._build_migration_commands(source, destination, mirror_dir, include_lfs)
             for command in commands:
                 self._run_command(command)
+
+            github_repo = self._parse_github_repo(destination)
+            if github_repo and (apply_github_default_branch or apply_github_security):
+                self._ensure_command("gh")
+                self._ensure_github_cli_authenticated()
+                source_default_branch = self._get_source_default_branch(mirror_dir, source)
+                self._apply_github_post_migration_settings(
+                    github_repo,
+                    source_default_branch,
+                    apply_github_default_branch,
+                    apply_github_security,
+                )
+            elif apply_github_default_branch or apply_github_security:
+                self.log_queue.put("宛先がGitHubではないため、GitHub向け設定はスキップしました。")
 
             if enable_verification:
                 self._verify_migration(
@@ -347,6 +460,125 @@ class MigrationApp:
 
         self.log_queue.put("ヴェリファイ完了: 一致を確認しました。")
 
+    def _parse_github_repo(self, destination: str) -> tuple[str, str] | None:
+        normalized = destination.strip()
+        if normalized.endswith(".git"):
+            normalized = normalized[:-4]
+
+        if normalized.startswith("git@github.com:"):
+            path = normalized.split(":", 1)[1]
+            parts = path.split("/")
+            if len(parts) == 2:
+                return parts[0], parts[1]
+            return None
+
+        if normalized.startswith("ssh://git@github.com/"):
+            path = normalized.split("github.com/", 1)[1]
+            parts = path.split("/")
+            if len(parts) == 2:
+                return parts[0], parts[1]
+            return None
+
+        if normalized.startswith("https://github.com/") or normalized.startswith("http://github.com/"):
+            parsed = urllib.parse.urlparse(normalized)
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) >= 2:
+                return path_parts[0], path_parts[1]
+
+        return None
+
+    def _get_source_default_branch(self, mirror_dir: str, source: str) -> str | None:
+        code, output = self._run_command_capture_with_code(
+            ["git", "-C", mirror_dir, "symbolic-ref", "--short", "HEAD"],
+            echo=False,
+        )
+        if code == 0:
+            line = output.strip().splitlines()
+            if line:
+                return line[0].strip().replace("refs/heads/", "")
+
+        code, output = self._run_command_capture_with_code(
+            ["git", "ls-remote", "--symref", source, "HEAD"],
+            echo=False,
+        )
+        if code != 0:
+            return None
+
+        for line in output.splitlines():
+            if line.startswith("ref:") and "\tHEAD" in line:
+                # format: ref: refs/heads/main	HEAD
+                left = line.split("\t", 1)[0]
+                ref = left.replace("ref:", "").strip()
+                return ref.replace("refs/heads/", "")
+
+        return None
+
+    def _apply_github_post_migration_settings(
+        self,
+        github_repo: tuple[str, str],
+        source_default_branch: str | None,
+        apply_default_branch: bool,
+        apply_security: bool,
+    ) -> None:
+        owner, repo = github_repo
+
+        self.log_queue.put(f"GitHub向け設定を適用します: {owner}/{repo}")
+
+        if apply_default_branch:
+            if source_default_branch:
+                self._run_command(
+                    [
+                        "gh",
+                        "api",
+                        "-X",
+                        "PATCH",
+                        f"repos/{owner}/{repo}",
+                        "-f",
+                        f"default_branch={source_default_branch}",
+                    ]
+                )
+                self.log_queue.put(
+                    f"GitHubデフォルトブランチを設定しました: {source_default_branch}"
+                )
+            else:
+                self.log_queue.put(
+                    "移行元デフォルトブランチを取得できなかったため、デフォルトブランチ設定をスキップしました。"
+                )
+
+        if apply_security:
+            self._run_command(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "PUT",
+                    f"repos/{owner}/{repo}/vulnerability-alerts",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                ]
+            )
+            self.log_queue.put("GitHub Dependabot Alerts を有効化しました。")
+
+            self._run_command(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "PUT",
+                    f"repos/{owner}/{repo}/automated-security-fixes",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                ]
+            )
+            self.log_queue.put("GitHub Automated Security Fixes を有効化しました。")
+
+    def _ensure_github_cli_authenticated(self) -> None:
+        code, _ = self._run_command_capture_with_code(["gh", "auth", "status"], echo=False)
+        if code != 0:
+            raise RuntimeError(
+                "GitHub CLIの認証が必要です。`gh auth login` を実行してください。"
+            )
+
     def _get_refs(self, repo_dir: str) -> dict[str, str]:
         output = self._run_command_capture(
             [
@@ -371,20 +603,77 @@ class MigrationApp:
     def _verify_strict_content(
         self, source_repo_dir: str, destination_repo_dir: str, refs: dict[str, str]
     ) -> None:
-        self.log_queue.put("strict検証: 全refsのツリー一覧を比較します。")
+        self.log_queue.put("strict検証: refごとのオブジェクトIDとtree IDを比較します。")
+        verified_tree_refs = 0
         for ref_name in sorted(refs.keys()):
-            source_tree = self._run_command_capture(
-                ["git", "-C", source_repo_dir, "ls-tree", "-r", "--full-tree", ref_name],
-                echo=False,
-            )
-            destination_tree = self._run_command_capture(
-                ["git", "-C", destination_repo_dir, "ls-tree", "-r", "--full-tree", ref_name],
-                echo=False,
-            )
-            if source_tree != destination_tree:
-                raise RuntimeError(f"strict検証失敗: ref内容不一致 {ref_name}")
+            source_obj = self._resolve_ref_object(source_repo_dir, ref_name)
+            destination_obj = self._resolve_ref_object(destination_repo_dir, ref_name)
+            if source_obj != destination_obj:
+                raise RuntimeError(f"strict検証失敗: refオブジェクト不一致 {ref_name}")
 
-        self.log_queue.put(f"strict検証OK: {len(refs)} refs の内容一致")
+            source_tree = self._resolve_ref_tree(source_repo_dir, ref_name)
+            destination_tree = self._resolve_ref_tree(destination_repo_dir, ref_name)
+            if source_tree is None and destination_tree is None:
+                continue
+
+            if source_tree != destination_tree:
+                raise RuntimeError(f"strict検証失敗: ref tree不一致 {ref_name}")
+
+            verified_tree_refs += 1
+
+        self.log_queue.put(
+            f"strict検証OK: {len(refs)} refs 検証完了 (tree比較: {verified_tree_refs})"
+        )
+
+    def _resolve_ref_object(self, repo_dir: str, ref_name: str) -> str:
+        code, output = self._run_command_capture_with_code(
+            ["git", "-C", repo_dir, "rev-parse", "--verify", f"{ref_name}^{{}}"],
+            echo=False,
+        )
+        if code != 0:
+            raise RuntimeError(f"strict検証失敗: ref解決不可 {ref_name}")
+
+        resolved = output.strip().splitlines()
+        if not resolved:
+            raise RuntimeError(f"strict検証失敗: ref解決結果が空です {ref_name}")
+
+        return resolved[0].strip()
+
+    def _resolve_ref_tree(self, repo_dir: str, ref_name: str) -> str | None:
+        code, output = self._run_command_capture_with_code(
+            ["git", "-C", repo_dir, "rev-parse", "--verify", f"{ref_name}^{{tree}}"],
+            echo=False,
+        )
+        if code != 0:
+            return None
+
+        resolved = output.strip().splitlines()
+        if not resolved:
+            return None
+
+        return resolved[0].strip()
+
+    def _run_command_capture_with_code(
+        self, command: list[str], echo: bool = True
+    ) -> tuple[int, str]:
+        command_display = " ".join(command)
+        if echo:
+            self.log_queue.put(f"[RUN] {command_display}")
+
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding=self.system_encoding,
+            errors="replace",
+            check=False,
+        )
+
+        combined_output = (completed.stdout or "") + (completed.stderr or "")
+        for line in combined_output.splitlines():
+            self.log_queue.put(line)
+
+        return completed.returncode, (completed.stdout or "")
 
     def _run_command(self, command: list[str], echo: bool = True) -> None:
         command_display = " ".join(command)

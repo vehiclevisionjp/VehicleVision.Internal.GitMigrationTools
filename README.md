@@ -10,6 +10,9 @@ Gitレポジトリをサーバ間で移行するためのGUIツールです。Gi
 - 移行前に移行先が空かどうかをチェック可能（既存refs検出で中断）
 - ドライラン対応（実行予定コマンドのみ表示）
 - 移行後ヴェリファイ対応（既定: `strict`）
+- 移行先がGitHubの場合、移行元に合わせてデフォルトブランチを自動設定可能
+- 移行先がGitHubの場合、Dependabot Alerts / Automated Security Fixes を有効化可能
+- 起動時に `git` / `git-lfs` / `gh` の利用可否を画面表示
 - 実行ログをGUI内で確認
 
 ## 前提条件
@@ -17,6 +20,7 @@ Gitレポジトリをサーバ間で移行するためのGUIツールです。Gi
 - Python 3.10 以上
 - Git がインストールされ、`PATH` に通っていること
 - Git LFS がインストールされていること（LFS移行を有効化する場合）
+- GitHub向け設定を使う場合は GitHub CLI (`gh`) がインストールされていること
 - 移行元・移行先に対するアクセス権があること
 
 ## 使い方
@@ -40,6 +44,8 @@ python .\git_migration_gui.py
 - ドライラン（実際には実行せずコマンドのみ表示）
 - 移行後ヴェリファイを実施する
 - ヴェリファイモード（`strict` / `quick`、既定は `strict`）
+- GitHub宛先時にデフォルトブランチを設定する
+- GitHub宛先時に推奨セキュリティ設定を有効化する
 
 1. 「移行開始」をクリックします。
 
@@ -60,7 +66,13 @@ git -C <temp>/mirror.git lfs push --all <destination>
 - `git clone --mirror <destination>` で移行先ミラーを取得
 - `for-each-ref` で heads/tags の参照一致を確認
 - 移行元/移行先の `git fsck --full` を実行
-- `strict` モードでは、各refの `git ls-tree -r --full-tree` の結果を比較
+- `strict` モードでは、各refの解決オブジェクトIDと tree ID（取得可能な場合）を比較
+
+GitHub 宛先の場合、GitHub CLI (`gh`) で認証済みなら以下も実施できます。
+
+- 移行元のデフォルトブランチ名を取得し、移行先の default branch に設定
+- Dependabot Alerts を有効化
+- Automated Security Fixes を有効化
 
 ## 補足
 
@@ -104,6 +116,12 @@ GitHub Actions のワークフローを追加しています。
 - トリガー: `push` (main/master), `pull_request`
 - 実行内容: `python -m py_compile git_migration_gui.py`
 
+サプライチェーン対策として、PR時の Dependency Review も追加しています。
+
+- ファイル: `.github/workflows/dependency-review.yml`
+- トリガー: `pull_request`
+- 実行内容: `actions/dependency-review-action@v4` (`high` 以上で失敗)
+
 ## Dependabot
 
 Dependabot の設定を追加しています。
@@ -111,6 +129,21 @@ Dependabot の設定を追加しています。
 - ファイル: `.github/dependabot.yml`
 - 更新対象: pip, GitHub Actions
 - スケジュール: 毎週月曜 (Asia/Tokyo)
+
+## GitHub CLI連携の前提
+
+移行ツールから GitHub のデフォルトブランチ設定/セキュリティ設定を行うには、
+GitHub CLI (`gh`) の認証が必要です。
+
+```powershell
+gh auth login
+gh auth status
+```
+
+必要権限の例:
+
+- Repository administration (default branch変更)
+- Dependabot alerts / security updates の管理権限
 
 ## 開発セットアップ
 
