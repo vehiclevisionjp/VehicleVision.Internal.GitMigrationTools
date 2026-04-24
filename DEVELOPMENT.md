@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 ```powershell
 python -m pip install --upgrade pip pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name GitMigrationTool --icon assets/icon.ico --add-data "assets:assets" .\git_migration_gui.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name GitMigrationTool --icon assets\icon.ico --add-data "assets;assets" .\git_migration_gui.py
 ```
 
 ## GitHub Actions
