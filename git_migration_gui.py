@@ -1,5 +1,6 @@
 import os
 import queue
+import locale
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ class MigrationApp:
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker_thread: threading.Thread | None = None
+        self.system_encoding = locale.getpreferredencoding(False) or "utf-8"
 
         self.source_url = tk.StringVar()
         self.destination_url = tk.StringVar()
@@ -394,7 +396,7 @@ class MigrationApp:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            encoding="utf-8",
+            encoding=self.system_encoding,
             errors="replace",
         )
 
@@ -415,7 +417,7 @@ class MigrationApp:
             command,
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            encoding=self.system_encoding,
             errors="replace",
             check=False,
         )
