@@ -16,6 +16,15 @@ class MigrationApp:
         self.root.title("Git Repository Migration Tool (with LFS)")
         self.root.geometry("900x620")
 
+        # Set application icon if available
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon_image = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(False, icon_image)
+            except Exception:
+                pass  # Silently fail if icon cannot be loaded
+
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker_thread: threading.Thread | None = None
         self.system_encoding = locale.getpreferredencoding(False) or "utf-8"

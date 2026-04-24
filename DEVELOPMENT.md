@@ -15,6 +15,22 @@ pre-commit run --all-files
 - `.pre-commit-config.yaml`
 - `requirements-dev.txt`
 
+## アイコン生成
+
+アプリケーション用のアイコン（PNG / ICO）を生成します。
+
+```powershell
+python -m pip install pillow
+python .\generate_icon.py
+```
+
+生成されるファイル:
+
+- `assets/icon.png` - GUI アプリケーション用
+- `assets/icon.ico` - EXE ビルド用 (Windows)
+
+既に生成済みの場合は実行不要です。
+
 ## EXEビルド (Windows)
 
 ```powershell
@@ -38,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 ```powershell
 python -m pip install --upgrade pip pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name GitMigrationTool .\git_migration_gui.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name GitMigrationTool --icon assets/icon.ico --add-data "assets:assets" .\git_migration_gui.py
 ```
 
 ## GitHub Actions
